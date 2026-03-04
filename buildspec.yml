@@ -1,0 +1,43 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - echo "Installing dependencies..."
+      - npm ci
+      - echo "Installing security scanners..."
+      - npm install -g snyk
+      - curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+      
+  pre_build:
+    commands:
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      
+      - echo "Running security scans..."
+      - echo "SCA Scan (Snyk)..."
+      - SNYK_TOKEN=$(aws secretsmanager get-secret-value --secret-id omni/snyk-token --query SecretString --output text | jq -r .SNYK_TOKEN)
+      - snyk auth $SNYK_TOKEN
+      - snyk test --severity-threshold=high || true
+      
+  build:
+    commands:
+      - echo "Building Docker image..."
+      - docker build -t $ECR_REPOSITORY:latest .
+      - echo "Scanning image with Trivy..."
+      - trivy image --severity HIGH,CRITICAL --no-progress $ECR_REPOSITORY:latest
+      
+  post_build:
+    commands:
+      - echo "Pushing image to ECR..."
+      - docker tag $ECR_REPOSITORY:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY:latest
+      - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY:latest
+      - echo "Build completed on `date`"
+
+artifacts:
+  files:
+    - '**/*'
+  base-directory: '.'
+  discard-paths: no
